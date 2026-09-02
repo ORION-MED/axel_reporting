@@ -1,0 +1,17 @@
+{
+  "name": "dashboard-monorepo",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently --kill-others-on-fail \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:frontend": "npx wait-on tcp:127.0.0.1:3001 --timeout 60000 && cd frontend && npm run dev",
+    "dev:backend": "cd backend && npm run start:dev",
+    "build": "cd frontend && npm run build",
+    "preserve": "npx kill-port 3000 3001 --silent || true",
+    "serve": "concurrently --kill-others-on-fail \"npm run dev:backend\" \"npm run serve:frontend\"",
+    "serve:frontend": "npx wait-on tcp:127.0.0.1:3001 --timeout 60000 && cd frontend && npx vite preview --port 3000",
+    "install:all": "cd frontend && npm install && cd ../backend && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

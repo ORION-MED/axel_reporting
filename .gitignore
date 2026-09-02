@@ -1,0 +1,92 @@
+# ─── Dependencies ─────────────────────────────────────────────────────────────
+node_modules/
+.pnp
+.pnp.js
+
+# ─── Build output ─────────────────────────────────────────────────────────────
+dist/
+build/
+frontend/dist/
+backend/dist/
+
+# ─── Environment / secrets ────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+.env.docker
+# keep .env.docker.example and .env.example committed as templates
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.venv/
+venv/
+env/
+.Python
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# ─── Vite / TypeScript ────────────────────────────────────────────────────────
+.vite/
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ─── Docker volumes / local data ──────────────────────────────────────────────
+docker/data/
+docker/postgres/data/
+.docker-volumes/
+
+# ─── Test / coverage ──────────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+htmlcov/
+.coverage
+*.cover
+
+# ─── IDE ──────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*.suo
+*.user
+
+# ─── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ─── Misc ─────────────────────────────────────────────────────────────────────
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
+
+# ─── Рабочие материалы проекта (не код) ───────────────────────────────────────
+# Данные региона, переписка и артефакты сборки. В репозиторий не попадают:
+# в AXEL_контекст лежат реальные выгрузки по медорганизациям, а outputs весит
+# около гигабайта (релизные образы, снимки расчёта, экспорт).
+AXEL_контекст/
+outputs/
+.codex_tmp/
+AXEL_reporting_roadmap_*.md
+AXEL_отчет_по_проекту_*.md
+
+# Собранные образы для переноса на сервер — сотни мегабайт, в репозитории им не место.
+release/

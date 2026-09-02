@@ -1,0 +1,375 @@
+x-logging:
+  app: &app-logging
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "10"
+      tag: "{{.Name}}"
+  infra: &infra-logging
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+      tag: "{{.Name}}"
+  init: &init-logging
+    driver: json-file
+    options:
+      max-size: "5m"
+      max-file: "2"
+      tag: "{{.Name}}"
+
+services:
+
+  minio:
+    image: minio/minio:latest
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *infra-logging
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./docker/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *infra-logging
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-telemed-storage}
+    entrypoint: >
+      sh -c "
+        mc alias set local http://minio:9000 $$S3_ACCESS_KEY $$S3_SECRET_KEY &&
+        mc mb --ignore-existing local/$$S3_BUCKET &&
+        mc ilm add local/$$S3_BUCKET --prefix 'raw/'       --expiry-days 7 &&
+        mc ilm add local/$$S3_BUCKET --prefix 'staging/'   --expiry-days 7 &&
+        mc ilm add local/$$S3_BUCKET --prefix 'processed/' --expiry-days 7 &&
+        echo 'Bucket ready with 7-day lifecycle rules'
+      "
+    restart: "no"
+    logging: *init-logging
+
+  app-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${APP_DB_NAME:-telemed_app}
+      POSTGRES_USER: ${APP_DB_USER:-telemed}
+      POSTGRES_PASSWORD: ${APP_DB_PASSWORD:-telemed_pass}
+    ports:
+      - "${APP_DB_PORT:-5433}:5432"
+    volumes:
+      - app_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${APP_DB_USER:-telemed} -d ${APP_DB_NAME:-telemed_app}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *infra-logging
+
+  eicu-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${EICU_DB_NAME:-eicu}
+      POSTGRES_USER: ${EICU_DB_USER:-eicu}
+      POSTGRES_PASSWORD: ${EICU_DB_PASSWORD:-eicu_pass}
+    ports:
+      - "${EICU_DB_PORT_EXTERNAL:-5434}:5432"
+    volumes:
+      - eicu_db_data:/var/lib/postgresql/data
+      - ./docker/postgres/eicu-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${EICU_DB_USER:-eicu} -d ${EICU_DB_NAME:-eicu}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *infra-logging
+
+  eicu-schema-init:
+    image: postgres:16-alpine
+    depends_on:
+      eicu-db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${EICU_DB_PASSWORD:-eicu_pass}
+    volumes:
+      - ./docker/postgres/eicu-init:/init:ro
+    command: >
+      sh -c "
+      if [ \"$(psql -h eicu-db -U ${EICU_DB_USER:-eicu} -d ${EICU_DB_NAME:-eicu} -tAc \"SELECT to_regclass('public.patient') IS NOT NULL\")\" = \"t\" ]; then
+        echo 'eICU schema already exists, skip init';
+      else
+        psql -h eicu-db -U ${EICU_DB_USER:-eicu} -d ${EICU_DB_NAME:-eicu} -f /init/eicu_create_schema.sql;
+      fi"
+    restart: "no"
+    logging: *init-logging
+
+  mimic-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${MIMIC_DB_NAME:-mimiciv}
+      POSTGRES_USER: ${MIMIC_DB_USER:-mimic}
+      POSTGRES_PASSWORD: ${MIMIC_DB_PASSWORD:-mimic_pass}
+    ports:
+      - "${MIMIC_DB_PORT_EXTERNAL:-5435}:5432"
+    volumes:
+      - mimic_db_data:/var/lib/postgresql/data
+      - ./docker/postgres/mimic-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${MIMIC_DB_USER:-mimic} -d ${MIMIC_DB_NAME:-mimiciv}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *infra-logging
+
+  mimic-schema-init:
+    image: postgres:16-alpine
+    depends_on:
+      mimic-db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${MIMIC_DB_PASSWORD:-mimic_pass}
+    volumes:
+      - ./docker/postgres/mimic-init:/init:ro
+    command: >
+      sh -c "
+      if [ \"$(psql -h mimic-db -U ${MIMIC_DB_USER:-mimic} -d ${MIMIC_DB_NAME:-mimiciv} -tAc \"SELECT to_regclass('mimiciv_hosp.admissions') IS NOT NULL\")\" = \"t\" ]; then
+        echo 'MIMIC schema already exists, skip init';
+      else
+        psql -h mimic-db -U ${MIMIC_DB_USER:-mimic} -d ${MIMIC_DB_NAME:-mimiciv} -f /init/mimiciv_create_schema.sql;
+      fi"
+    restart: "no"
+    logging: *init-logging
+
+  pic-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${PIC_DB_NAME:-picdb}
+      POSTGRES_USER: ${PIC_DB_USER:-pic}
+      POSTGRES_PASSWORD: ${PIC_DB_PASSWORD:-pic_pass}
+    ports:
+      - "${PIC_DB_PORT_EXTERNAL:-5436}:5432"
+    volumes:
+      - pic_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PIC_DB_USER:-pic} -d ${PIC_DB_NAME:-picdb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *infra-logging
+
+  pic-schema-init:
+    image: postgres:16-alpine
+    depends_on:
+      pic-db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${PIC_DB_PASSWORD:-pic_pass}
+    volumes:
+      - ./docker/postgres/paediatric-Intensive-care:/init:ro
+    command: >
+      sh -c "
+      if [ \"$(psql -h pic-db -U ${PIC_DB_USER:-pic} -d ${PIC_DB_NAME:-picdb} -tAc \"SELECT to_regclass('public.admissions') IS NOT NULL\")\" = \"t\" ]; then
+        echo 'PICDB tables already exist, skip init';
+      elif [ -f /init/ADMISSIONS.csv ]; then
+        psql -h pic-db -U ${PIC_DB_USER:-pic} -d ${PIC_DB_NAME:-picdb} -f /init/paediatric-Intensive-care-create-tables-load-data-cs.sql;
+      else
+        echo 'PICDB CSV files are not found in /init. Creating schema only from SQL file (without \\COPY).';
+        grep -v '^[[:space:]]*\\COPY[[:space:]]' /init/paediatric-Intensive-care-create-tables-load-data-cs.sql | grep -v '^[[:space:]]*\\copy[[:space:]]' | psql -h pic-db -U ${PIC_DB_USER:-pic} -d ${PIC_DB_NAME:-picdb};
+      fi"
+    restart: "no"
+    logging: *init-logging
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: telemed-backend:latest
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3001/api/',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3001
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      API_PREFIX: ${API_PREFIX:-api}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      JWT_SECRET: ${JWT_SECRET:-change_me_in_production}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      AUTH_DB_HOST: app-db
+      AUTH_DB_PORT: 5432
+      AUTH_DB_NAME: ${APP_DB_NAME:-telemed_app}
+      AUTH_DB_USER: ${APP_DB_USER:-telemed}
+      AUTH_DB_PASSWORD: ${APP_DB_PASSWORD:-telemed_pass}
+      EICU_DB_HOST: eicu-db
+      EICU_DB_PORT: 5432
+      EICU_DB_NAME: ${EICU_DB_NAME:-eicu}
+      EICU_DB_USER: ${EICU_DB_USER:-eicu}
+      EICU_DB_PASSWORD: ${EICU_DB_PASSWORD:-eicu_pass}
+      MIMIC_DB_HOST: mimic-db
+      MIMIC_DB_PORT: 5432
+      MIMIC_DB_NAME: ${MIMIC_DB_NAME:-mimiciv}
+      MIMIC_DB_USER: ${MIMIC_DB_USER:-mimic}
+      MIMIC_DB_PASSWORD: ${MIMIC_DB_PASSWORD:-mimic_pass}
+      MIMIC_SCHEMAS: ${MIMIC_SCHEMAS:-mimiciv_hosp,mimiciv_icu}
+      MIMIC_DB_SEARCH_PATH: ${MIMIC_DB_SEARCH_PATH:-mimiciv_hosp,mimiciv_icu,public}
+      PIC_DB_HOST: pic-db
+      PIC_DB_PORT: 5432
+      PIC_DB_NAME: ${PIC_DB_NAME:-picdb}
+      PIC_DB_USER: ${PIC_DB_USER:-pic}
+      PIC_DB_PASSWORD: ${PIC_DB_PASSWORD:-pic_pass}
+      DB_POOL_MAX: ${DB_POOL_MAX:-20}
+      DB_IDLE_TIMEOUT: ${DB_IDLE_TIMEOUT:-30000}
+      DB_CONNECTION_TIMEOUT: ${DB_CONNECTION_TIMEOUT:-10000}
+      JSON_BODY_LIMIT: ${JSON_BODY_LIMIT:-5mb}
+      UPLOAD_MAX_FILE_SIZE: ${UPLOAD_MAX_FILE_SIZE:-1073741824}
+      SUPPORT_SMTP_HOST: ${SUPPORT_SMTP_HOST:-}
+      SUPPORT_SMTP_PORT: ${SUPPORT_SMTP_PORT:-587}
+      SUPPORT_SMTP_USER: ${SUPPORT_SMTP_USER:-}
+      SUPPORT_SMTP_PASS: ${SUPPORT_SMTP_PASS:-}
+      SUPPORT_SMTP_SECURE: ${SUPPORT_SMTP_SECURE:-false}
+      SUPPORT_TO_EMAIL: ${SUPPORT_TO_EMAIL:-}
+      SUPPORT_FROM_EMAIL: ${SUPPORT_FROM_EMAIL:-}
+      SUPPORT_SMTP_CONNECTION_TIMEOUT: ${SUPPORT_SMTP_CONNECTION_TIMEOUT:-10000}
+      SUPPORT_SMTP_GREETING_TIMEOUT: ${SUPPORT_SMTP_GREETING_TIMEOUT:-10000}
+      SUPPORT_SMTP_SOCKET_TIMEOUT: ${SUPPORT_SMTP_SOCKET_TIMEOUT:-10000}
+      SUPPORT_SMTP_DNS_TIMEOUT: ${SUPPORT_SMTP_DNS_TIMEOUT:-10000}
+      SUPPORT_SMTP_TLS_SERVERNAME: ${SUPPORT_SMTP_TLS_SERVERNAME:-}
+      S3_BUCKET: ${S3_BUCKET:-telemed-storage}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_FORCE_PATH_STYLE: "true"
+      S3_PART_SIZE_MB: ${S3_PART_SIZE_MB:-16}
+      S3_QUEUE_SIZE: ${S3_QUEUE_SIZE:-8}
+      S3_MAX_SOCKETS: ${S3_MAX_SOCKETS:-50}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672
+      RABBITMQ_QUEUE: ${RABBITMQ_QUEUE:-jobs}
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      app-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      eicu-schema-init:
+        condition: service_completed_successfully
+      mimic-schema-init:
+        condition: service_completed_successfully
+      pic-schema-init:
+        condition: service_completed_successfully
+    command: sh -c "node dist/migrations/run-migrations.js && node dist/main.js"
+    ports:
+      - "${BACKEND_HOST:-0.0.0.0}:${BACKEND_PORT:-3001}:3001"
+    # External DNS needed to resolve SUPPORT_SMTP_HOST (external mail server)
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    restart: unless-stopped
+    logging: *app-logging
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/}
+        VITE_SUPPORT_PORTAL_URL: ${VITE_SUPPORT_PORTAL_URL:-}
+        VITE_SUPPORT_KB_URL: ${VITE_SUPPORT_KB_URL:-}
+        VITE_YANDEX_METRIKA_ID: ${VITE_YANDEX_METRIKA_ID:-}
+    image: telemed-frontend:latest
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_HOST:-0.0.0.0}:${FRONTEND_PORT:-3000}:80"
+    restart: unless-stopped
+    logging: *app-logging
+
+  python-worker:
+    build:
+      context: ./python-worker
+      dockerfile: Dockerfile
+    image: telemed-worker:latest
+    # container_name убран намеренно — позволяет docker compose up --scale python-worker=N
+    mem_limit: 1500m
+    memswap_limit: 1500m
+    cpus: '2.0'
+    environment:
+      AUTH_DB_HOST: app-db
+      AUTH_DB_PORT: 5432
+      AUTH_DB_NAME: ${APP_DB_NAME:-telemed_app}
+      AUTH_DB_USER: ${APP_DB_USER:-telemed}
+      AUTH_DB_PASSWORD: ${APP_DB_PASSWORD:-telemed_pass}
+      S3_BUCKET: ${S3_BUCKET:-telemed-storage}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_FORCE_PATH_STYLE: "true"
+      WORKER_ID: ${WORKER_ID:-}   # optional; python-worker falls back to container hostname
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672
+      RABBITMQ_QUEUE: ${RABBITMQ_QUEUE:-jobs}
+      # Return memory to OS after each job instead of holding RSS high
+      MALLOC_TRIM_THRESHOLD_: "65536"
+      MALLOC_MMAP_THRESHOLD_: "65536"
+      # Limit OpenBLAS threads to match CPU quota
+      OPENBLAS_NUM_THREADS: "2"
+      OMP_NUM_THREADS: "2"
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+      app-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    restart: unless-stopped
+    logging: *app-logging
+
+volumes:
+  app_db_data:
+  eicu_db_data:
+  mimic_db_data:
+  pic_db_data:
+  minio_data:
+  rabbitmq_data:
